@@ -1,0 +1,6 @@
+output_directory: ../output
+default_threshold_c: 33.0
+contour:
+  color: red
+  max_gap_px: 3
+  min_area_sensor_pixels: 80
