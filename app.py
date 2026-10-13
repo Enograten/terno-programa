@@ -351,6 +351,8 @@ with analysis_tab:
                                         col.metric(label, f"{value:.2f} °C")
                                 temperature_range = row["max_temperature"] - row["min_temperature"]
                                 st.markdown(f"Температурний діапазон (Tmax − Tmin): **{temperature_range:.2f} °C**")
+                                variance = row.get("variance_c2", row["std"] ** 2)
+                                st.markdown(f"Дисперсія температур: **{variance:.3f} °C²**")
                                 show_distribution(result.thermal.temperatures, result.regions[row["region_id"]])
                                 st.caption(f"Площа: {row['pixel_count']:,} пікселів")
                 if report["comparison"]:
