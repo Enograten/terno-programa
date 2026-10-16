@@ -15,6 +15,12 @@ import yaml
 from src.errors import AnalysisError
 from src.thermal_reader import load_thermal, read_rgb
 from src.analyzer import analyze
+# Streamlit may retain modules loaded before an update while rerunning app.py.
+# Refresh the old storage module before binding the new history API.
+from src import storage as storage_module
+if not hasattr(storage_module, "edit_history_record") or getattr(storage_module, "HISTORY_API_VERSION", 0) < 2:
+    import importlib
+    importlib.reload(storage_module)
 from src.storage import build_report, save_report, csv_bytes, json_bytes, load_history
 from src.comparison_table import comparison_rows, comparison_csv
 from src.visualization import png_bytes
@@ -29,12 +35,28 @@ WORK = Path(st.session_state["public_workspace"].name)
 OUTPUT = WORK / "output"
 
 def load_history(root):
-    return list(st.session_state.get("public_reports", {}).values())
+    return [dict(report, _history_key=key+".json") for key, report in st.session_state.get("public_reports", {}).items()]
 
 def save_report(root, analysis, report):
     digest = hashlib.sha256(json_bytes(report)).hexdigest()
     st.session_state.setdefault("public_reports", {})[digest] = json.loads(json_bytes(report))
     return "session"
+
+def edit_public_record(root, record, region_id, changes=None, delete=False):
+    from src.storage import edit_history_record
+    key = record["_history_key"][:-5]
+    reports = st.session_state.get("public_reports", {})
+    if key not in reports:
+        raise AnalysisError("Запис уже недоступний у цій сесії.")
+    # This directory belongs only to this visitor's temporary workspace.
+    folder = Path(root)/"results"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder/(key+".json")).write_bytes(json_bytes(reports[key]))
+    updated = edit_history_record(root, record, region_id, changes, delete)
+    if updated.get("deleted"):
+        del reports[key]
+    else:
+        reports[key] = updated
 
 st.set_page_config(page_title="Термограма", page_icon=":material/thermostat:", layout="wide")
 st.markdown("<style>"+zipfile.ZipFile(ROOT/"source.zip").read("assets/interface.css").decode("utf-8")+"</style>", unsafe_allow_html=True)
@@ -52,6 +74,11 @@ def read_upload(data, filename, byte_order, overrides_json):
 
 
 def history_view():
+    if st.session_state.pop("history_reset_filters", False):
+        for field in ("history_patient", "history_area", "history_session"):
+            st.session_state[field] = None
+    if "history_notice" in st.session_state:
+        st.success(st.session_state.pop("history_notice"))
     st.subheader("Таблиця порівняння")
     history = load_history(OUTPUT)
     include_demo = False
@@ -79,12 +106,33 @@ def history_view():
     if frame.empty:
         st.info("За цими фільтрами немає вимірювань.")
         return
-    st.dataframe(frame, hide_index=True, width="stretch", column_config={
+    ordered = sorted(records, key=lambda r: (r["measurement_date"], r.get("saved_at", r["created_at"])))
+    row_ids = [(r.get("_history_key"), region["region_id"]) for r in ordered for region in r["regions"]]
+    visible_ids = [row_ids[i] for i in frame.index]
+    signature = hashlib.sha256(repr((visible_ids, frame.to_dict("records"))).encode()).hexdigest()[:16]
+    table_key = "history_table_" + signature
+    selection = st.dataframe(frame, hide_index=True, width="stretch", key=table_key,
+        on_select="rerun", selection_mode="single-row", column_config={
         name: st.column_config.NumberColumn(format="%.3f" if name == "SD, °C" else "%.2f")
         for name in ["Середня, °C", "Мінімум, °C", "Максимум, °C", "SD, °C", "Діапазон, °C"]})
     st.download_button("Завантажити таблицю CSV", comparison_csv(frame.to_dict("records")),
         "comparison_table.csv", "text/csv", key="history_csv")
     st.caption(f"Рядків: {len(frame)}. CSV містить усі стовпці та лише відібрані записи; його можна відкрити в Excel.")
+    from src import history_editor as history_editor_module
+    if getattr(history_editor_module, "HISTORY_EDITOR_VERSION", 0) < 2:
+        import importlib
+        importlib.reload(history_editor_module)
+    history_editor = history_editor_module.history_editor
+    selected_rows = selection.selection.rows
+    event = (table_key, tuple(selected_rows))
+    if st.session_state.get("history_selection_event") != event:
+        st.session_state["history_selection_event"] = event
+        if selected_rows and selected_rows[0] < len(visible_ids):
+            st.session_state["history_active_row"] = visible_ids[selected_rows[0]]
+    active = st.session_state.get("history_active_row")
+    if active not in visible_ids:
+        active = None
+    history_editor(OUTPUT, records, active, edit_record=edit_public_record, backup_notice=False)
     if patient is None:
         st.caption("Для графіка оберіть одного учасника.")
         return
